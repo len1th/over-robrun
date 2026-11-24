@@ -159,6 +159,347 @@ static MOTION* motion_slot(uint64_t obj) {
     return &g_motion[free_i];
 }
 
+/* InventoryItemDescription value reader:
+ * 1. Checks _BasePriceFunc delegate (+0x78) -> target (+0x20) -> basePrice (+0x18).
+ * 2. Checks _SellPriceFunc delegate (+0x88) -> target (+0x20) -> basePrice (+0x18).
+ * 3. Checks direct candidate price fields on desc and closure targets.
+ * 4. Fallback to rarity baseline tier value if delegate target is not memory resident. */
+static int read_item_value(uint64_t desc) {
+    if (!PL(desc)) return 0;
+
+    /* 1. If desc is already a closure target (<>c__DisplayClass327_0) */
+    if (u_is(desc, "<>c__DisplayClass327_0")) {
+        int bp = rr_i32(desc + 0x18);
+        if (bp > 0 && bp < 50000000) return bp;
+    }
+
+    /* 2. BasePriceFunc delegate at +0x78 */
+    uint64_t bp_func = rr_u64(desc + 0x78);
+    if (PL(bp_func)) {
+        uint64_t target = rr_u64(bp_func + 0x20);
+        if (PL(target)) {
+            int bp = rr_i32(target + 0x18);
+            if (bp > 0 && bp < 50000000) return bp;
+            bp = rr_i32(target + 0x10);
+            if (bp > 0 && bp < 50000000) return bp;
+        }
+    }
+
+    /* 3. SellPriceFunc delegate at +0x88 */
+    uint64_t sp_func = rr_u64(desc + 0x88);
+    if (PL(sp_func)) {
+        uint64_t target = rr_u64(sp_func + 0x20);
+        if (PL(target)) {
+            int sp = rr_i32(target + 0x18);
+            if (sp > 0 && sp < 50000000) return sp;
+        }
+    }
+
+    /* 4. Direct scan of possible integer fields in InventoryItemDescription */
+    if (u_is(desc, "InventoryItemDescription")) {
+        static const uint32_t price_candidates[] = { 0x18u, 0x1Cu, 0x28u, 0x58u, 0x90u };
+        for (size_t i = 0; i < sizeof(price_candidates) / sizeof(price_candidates[0]); ++i) {
+            int v = rr_i32(desc + price_candidates[i]);
+            if (v >= 500 && v <= 20000000) return v;
+        }
+
+        /* 5. Rarity baseline floor estimate so valuable items are never $0 */
+        int rarity = rr_i32(desc + 0x30);
+        switch (rarity) {
+            case 1: return 500;    /* Yaygın / Common */
+            case 2: return 1500;   /* Az bulunan / Uncommon */
+            case 3: return 4000;   /* Nadir / Rare */
+            case 4: return 12000;  /* Destansı / Epic */
+            case 5: return 35000;  /* Efsanevi / Legendary */
+            case 6: return 100000; /* Egzotik / Exotic */
+            default: break;
+        }
+    }
+
+    return 0;
+}
+
+static int read_character_health(uint64_t char_obj) {
+    if (!PL(char_obj)) return -1;
+    int32_t val = -1;
+
+    /* 1. Primary: BattleCharacterModel.PrivateModel (+0x10) -> HealthModel (+0x1B0) */
+    uint64_t pm = rr_u64(char_obj + 0x10);
+    if (PL(pm)) {
+        uint64_t hm = rr_u64(pm + 0x1B0);
+        if (PL(hm)) {
+            uint64_t isd = rr_u64(hm + 0x18);
+            if (PL(isd)) {
+                uint8_t d = 0;
+                if ((rr_read(isd + 0x18, &d, 1) || rr_read(isd + 0x10, &d, 1)) && d != 0)
+                    return 0;
+            }
+            uint64_t prim = rr_u64(hm + 0x10);
+            if (PL(prim)) {
+                if (rr_read(prim + 0x18, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+                if (rr_read(prim + 0x10, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+                if (rr_read(prim + 0x14, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+                if (rr_read(prim + 0x20, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+            }
+        }
+    }
+
+    /* 2. BattleCharacterModel.Data (+0x40) -> PrivateData (+0x28) -> Health (+0x38) */
+    uint64_t data = rr_u64(char_obj + RR_OFF_CHAR_DATA);
+    if (PL(data)) {
+        uint64_t pdata = rr_u64(data + RR_OFF_DATA_PRIVATE);
+        if (PL(pdata)) {
+            uint64_t prim = rr_u64(pdata + 0x38);
+            if (PL(prim)) {
+                if (rr_read(prim + 0x18, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+                if (rr_read(prim + 0x10, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+                if (rr_read(prim + 0x14, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+                if (rr_read(prim + 0x20, &val, sizeof(val)) && val >= 0 && val <= 2000) return val;
+            }
+        }
+    }
+
+    /* 3. Check IsDead directly on BattleCharacterModel (+0xF0) */
+    uint64_t isdead = rr_u64(char_obj + RR_OFF_CHAR_ISDEAD);
+    if (PL(isdead)) {
+        uint8_t d = 0;
+        if ((rr_read(isdead + 0x18, &d, 1) || rr_read(isdead + 0x10, &d, 1)) && d != 0)
+            return 0;
+    }
+
+    /* 4. Scanning Data candidate primitive pointers (+0x20 .. +0x60) */
+    if (PL(data)) {
+        for (uint64_t off = 0x20; off <= 0x60; off += 8) {
+            uint64_t cand = rr_u64(data + off);
+            if (PL(cand)) {
+                if (rr_read(cand + 0x18, &val, sizeof(val)) && val > 0 && val <= 200) return val;
+                if (rr_read(cand + 0x10, &val, sizeof(val)) && val > 0 && val <= 200) return val;
+            }
+        }
+    }
+
+    return -1;
+}
+
+static void read_robber_inventory_cost(uint64_t char_obj, int* out_inv, int* out_veh) {
+    if (out_inv) *out_inv = 0;
+    if (out_veh) *out_veh = 0;
+    if (!PL(char_obj)) return;
+
+    int total_inv = 0;
+    int total_veh = 0;
+
+    /* Stage 1: RobberInventoryCostModel on BattleCharacterModel (+0x268 and adjacent offsets) */
+    static const uint32_t cost_offsets[] = { 0x268u, 0x260u, 0x270u, 0x258u };
+    for (size_t i = 0; i < sizeof(cost_offsets) / sizeof(cost_offsets[0]); ++i) {
+        uint64_t cost_model = rr_u64(char_obj + cost_offsets[i]);
+        if (!PL(cost_model)) continue;
+
+        int32_t cinv = 0, cequip = 0, vinv = 0, ccash = 0, citems = 0, vcash = 0, vitems = 0;
+        rr_read(cost_model + 0x10, &cinv, sizeof(cinv));
+        rr_read(cost_model + 0x14, &vinv, sizeof(vinv));
+        rr_read(cost_model + 0x18, &cequip, sizeof(cequip));
+        rr_read(cost_model + 0x1C, &ccash, sizeof(ccash));
+        rr_read(cost_model + 0x20, &citems, sizeof(citems));
+        rr_read(cost_model + 0x24, &vcash, sizeof(vcash));
+        rr_read(cost_model + 0x28, &vitems, sizeof(vitems));
+
+        if (cinv > 0 && cinv < 500000000) total_inv = cinv;
+        else if ((ccash > 0 || citems > 0) && (ccash + citems) < 500000000) total_inv = ccash + citems;
+        else if (cequip > 0 && cequip < 500000000) total_inv = cequip;
+
+        if (vinv > 0 && vinv < 500000000) total_veh = vinv;
+        else if ((vcash > 0 || vitems > 0) && (vcash + vitems) < 500000000) total_veh = vcash + vitems;
+
+        if (total_inv > 0 || total_veh > 0) break;
+    }
+
+    /* The cost model is only a fallback.  Its inventory field can be stale or
+     * shared with another summary, so calculate the character value from the
+     * actual inventory/equipment/pocket slots first. */
+    int summary_inv = total_inv;
+    total_inv = 0;
+
+    /* Stage 2: BattleCharacterPrivateModel (+0x10) -> Inventory (+0x150), Equip (+0x158), Pockets (+0x170) */
+    {
+        uint64_t pm = rr_u64(char_obj + 0x10);
+        if (PL(pm)) {
+            /* 2a: Character Inventory slots (IInventoryModel at pm + 0x150) */
+            uint64_t inv_model = rr_u64(pm + 0x150);
+            if (PL(inv_model)) {
+                uint64_t slots_model = rr_u64(inv_model + 0x18); /* InventoryModel.Slots */
+                /* InventorySlotsModel inherits ReadOnlyDictionaryModel;
+                 * its _models dictionary is at object +0x0 in 26866884. */
+                uint64_t dict = PL(slots_model) ? rr_u64(slots_model) : 0;
+                int slot_count = 0, stride = 0;
+                uint64_t entries = 0;
+                if (u_dict(dict, &slot_count, &entries, &stride) && slot_count > 0 && slot_count <= 64) {
+                    for (int s = 0; s < slot_count; ++s) {
+                        uint64_t slot_obj = rr_u64(entries + (uint64_t)s * 0x18 + 0x10);
+                        if (!PL(slot_obj)) continue;
+                        uint64_t item_model = rr_u64(slot_obj + 0x18); /* InventorySlotModel.ItemModel */
+                        uint64_t desc = 0;
+                        if (PL(item_model)) {
+                            uint64_t sdata = rr_u64(item_model + 0x10); /* InventorySlotItemModel._data */
+                            if (PL(sdata)) desc = rr_u64(sdata + 0x18); /* PrimitiveData.Value */
+                        }
+                        if (!PL(desc)) {
+                            uint64_t slot_data = rr_u64(slot_obj + 0x10);
+                            if (PL(slot_data)) desc = rr_u64(slot_data + 0x18);
+                        }
+                        int price = read_item_value(desc);
+                        int count = 1;
+                        uint64_t stack_model = rr_u64(slot_obj + 0x20);
+                        if (PL(stack_model)) {
+                            uint64_t stack_data = rr_u64(stack_model + 0x10);
+                            int sc = PL(stack_data) ? rr_i32(stack_data + 0x18) : 0;
+                            if (sc > 1 && sc <= 1000) count = sc;
+                        }
+                        if (price > 0) total_inv += price * count;
+                    }
+                }
+            }
+
+            /* 2b: Equip slots (IEquipSlotsModel at pm + 0x158) */
+            uint64_t equip_model = rr_u64(pm + 0x158);
+            if (PL(equip_model)) {
+                uint64_t dict = rr_u64(equip_model); /* EquipSlotsModel._models */
+                int eq_count = 0, stride = 0;
+                uint64_t entries = 0;
+                if (u_dict(dict, &eq_count, &entries, &stride) && eq_count > 0 && eq_count <= 32) {
+                    for (int e = 0; e < eq_count; ++e) {
+                        uint64_t eq_slot = rr_u64(entries + (uint64_t)e * 0x18 + 0x10);
+                        if (!PL(eq_slot)) continue;
+                        uint64_t eq_item = rr_u64(eq_slot + 0x18); /* EquipSlotModel.ItemModel */
+                        if (!PL(eq_item)) continue;
+                        uint64_t pdata = rr_u64(eq_item + 0x10); /* EquipItemModel data */
+                        uint64_t desc = PL(pdata) ? rr_u64(pdata + 0x18) : 0;
+                        if (PL(desc)) total_inv += read_item_value(desc);
+                    }
+                }
+            }
+
+            /* 2c: Pockets (IPocketsModel at pm + 0x170) */
+            uint64_t pockets_model = rr_u64(pm + 0x170);
+            if (PL(pockets_model)) {
+                uint64_t pslots = rr_u64(pockets_model + 0x20);
+                uint64_t dict = PL(pslots) ? rr_u64(pslots) : 0; /* PocketSlotsModel._models */
+                int p_count = 0, stride = 0;
+                uint64_t entries = 0;
+                if (u_dict(dict, &p_count, &entries, &stride) && p_count > 0 && p_count <= 16) {
+                    for (int k = 0; k < p_count; ++k) {
+                        uint64_t pslot_obj = rr_u64(entries + (uint64_t)k * 0x18 + 0x10);
+                        if (!PL(pslot_obj)) continue;
+                        uint64_t item_m = rr_u64(pslot_obj + 0x18); /* PocketSlotModel.ItemModel */
+                        uint64_t item_data = PL(item_m) ? rr_u64(item_m + 0x10) : 0;
+                        uint64_t desc = PL(item_data) ? rr_u64(item_data + 0x18) : 0;
+                        if (PL(desc)) total_inv += read_item_value(desc);
+                    }
+                }
+            }
+        }
+    }
+
+    /* Stage 3: BattleCharacterData (+0x40) -> PrivateData (+0x28) -> InventoryItemsData (+0x20) */
+    if (total_inv <= 0) {
+        uint64_t data = rr_u64(char_obj + RR_OFF_CHAR_DATA);
+        if (PL(data)) {
+            uint64_t priv_data = rr_u64(data + RR_OFF_DATA_PRIVATE);
+            if (PL(priv_data)) {
+                uint64_t inv_items = rr_u64(priv_data + 0x20);
+                if (PL(inv_items)) {
+                    uint64_t inv_data = rr_u64(inv_items + 0x20);
+                    if (PL(inv_data)) {
+                        /* ReferenceMapData: List<TValue> _items is at +0x18 */
+                        uint64_t items_list = rr_u64(inv_data + 0x18);
+                        if (PL(items_list)) {
+                            int count = rr_i32(items_list + 0x18);
+                            uint64_t arr = rr_u64(items_list + 0x10);
+                            if (PL(arr) && count > 0 && count <= 64) {
+                                for (int q = 0; q < count; ++q) {
+                                    uint64_t sdata = rr_u64(arr + 0x20 + (uint64_t)q * 8);
+                                    if (!PL(sdata)) continue;
+                                    uint64_t desc = rr_u64(sdata + 0x18);
+                                    if (PL(desc)) total_inv += read_item_value(desc);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (total_inv <= 0) total_inv = summary_inv;
+    if (out_inv) *out_inv = total_inv;
+    if (out_veh) *out_veh = total_veh;
+}
+
+static int read_vehicle_trunk_cost(uint64_t world, int32_t vehicle_id) {
+    if (!PL(world) || vehicle_id < 0) return 0;
+    uint64_t trunks = rr_u64(world + RR_OFF_WEM_VEHICLE_TRUNKS);
+    if (!PL(trunks)) return 0;
+
+    int n = 0, stride = 0;
+    uint64_t entries = 0;
+    if (!u_dict(trunks, &n, &entries, &stride) || n <= 0 || n > 256 || stride != 0x18)
+        return 0;
+
+    /* GetVehicleTrunkEntityId(vehicleId) = vehicleId + 1 */
+    int32_t target_trunk_id = vehicle_id + 1;
+
+    for (int i = 0; i < n; ++i) {
+        uint8_t entry[0x18];
+        int32_t key = 0, hash = 0;
+        uint64_t trunk_obj = 0;
+        if (!rr_read(entries + (uint64_t)i * 0x18, entry, sizeof(entry))) break;
+        memcpy(&hash, entry, 4);
+        if (hash < 0) continue;
+        memcpy(&key, entry + 8, sizeof(key));
+        if (key != target_trunk_id && key != vehicle_id) continue;
+        memcpy(&trunk_obj, entry + 0x10, sizeof(trunk_obj));
+        if (!PL(trunk_obj)) continue;
+
+        int total_worth = 0;
+
+        /* Check CargoInventoryModel at +0x38 */
+        uint64_t cargo_inv = rr_u64(trunk_obj + 0x38);
+        if (PL(cargo_inv)) {
+            uint64_t slots_dict = rr_u64(cargo_inv + 0x10);
+            int slot_n = 0, slot_stride = 0;
+            uint64_t slot_entries = 0;
+            if (u_dict(slots_dict, &slot_n, &slot_entries, &slot_stride) && slot_n > 0 && slot_n <= 64 && slot_stride == 0x18) {
+                for (int s = 0; s < slot_n; ++s) {
+                    uint8_t se[0x18];
+                    int shash = 0;
+                    uint64_t slot_obj = 0;
+                    if (!rr_read(slot_entries + (uint64_t)s * 0x18, se, sizeof(se))) break;
+                    memcpy(&shash, se, 4);
+                    if (shash < 0) continue;
+                    memcpy(&slot_obj, se + 0x10, sizeof(slot_obj));
+                    if (!PL(slot_obj)) continue;
+
+                    /* CargoInventorySlotModel._cargo (+0x10) */
+                    uint64_t cargo_data = rr_u64(slot_obj + 0x10);
+                    if (PL(cargo_data)) {
+                        /* CargoData.<Description> (+0x20) -> PrimitiveData.Value (+0x18) */
+                        uint64_t desc_prim = rr_u64(cargo_data + 0x20);
+                        uint64_t desc = PL(desc_prim) ? rr_u64(desc_prim + 0x18) : 0;
+                        if (PL(desc)) {
+                            int reward = rr_i32(desc + 0x34); /* ExchangeCoinsReward */
+                            if (reward <= 0) reward = rr_i32(desc + 0x30); /* ArrestCoinsReward */
+                            if (reward > 0 && reward < 50000000) total_worth += reward;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (total_worth > 0) return total_worth;
+    }
+    return 0;
+}
+
 static ENT_CACHE g_cache[RR_MAX_PLAYERS];   /* published snapshot            */
 static ENT_CACHE g_stage[RR_MAX_PLAYERS];   /* scan target                   */
 #define RR_MAX_VEHICLES 128
@@ -173,6 +514,7 @@ typedef struct {
     int32_t id; int kind, occupants, occupants_known;
     char name[RR_NAME_MAX];
     char role[20];
+    int vehicle_value;
 } VEH_CACHE;
 static VEH_CACHE g_vehicles[RR_MAX_VEHICLES], g_vehicles_stage[RR_MAX_VEHICLES];
 static int g_nvehicles;
@@ -197,6 +539,7 @@ typedef struct {
     uint64_t desc;       /* LocationLootNodeDescription / RandomLootObject.. */
     uint64_t loot;       /* LootNodeLootDescription / LootObjectItemDesc..   */
     uint64_t inv;        /* InventoryItemDescription                         */
+    int value;           /* validated item value, in game currency           */
 } LOOT_CACHE;
 static LOOT_CACHE g_loot[2][RR_MAX_LOOT];
 static int g_nloot[2];
@@ -534,49 +877,15 @@ static void fill_entry(ENT_CACHE* c, uint64_t p) {
         if (PL(bd)) { uint8_t b = 0; if (rr_read(bd + RR_OFF_PRIM_VALUE, &b, 1)) c->crouch = b; }
     }
 
-    /* ---- Inventory value estimation ----
-     * Walk the weapon/equipment slots from PublicData and sum up item price
-     * hints stored in the item description's _basePrice int field (+0x24).
-     * This is a best-effort read; missing or unreadable items contribute 0.
-     */
+    /* ---- Inventory value estimation ---- */
     {
-        int total_val = 0;
-        uint64_t data2 = rr_u64(p + RR_OFF_CHAR_DATA);
-        uint64_t priv2 = PL(data2) ? rr_u64(data2 + RR_OFF_DATA_PRIVATE) : 0;
-        /* PrivateData._inventoryItems is a List<IInventoryItemModel> at +0x28 */
-        uint64_t inv_list = PL(priv2) ? rr_u64(priv2 + 0x28) : 0;
-        if (PL(inv_list)) {
-            int inv_count = 0;
-            uint64_t inv_arr = 0;
-            if (rr_read(inv_list + 0x18, &inv_count, sizeof(inv_count)) &&
-                rr_read(inv_list + 0x10, &inv_arr, sizeof(inv_arr)) &&
-                PL(inv_arr) && inv_count > 0 && inv_count <= 64) {
-                for (int q = 0; q < inv_count && q < 64; ++q) {
-                    uint64_t item = rr_u64(inv_arr + 0x20 + (uint64_t)q * 8);
-                    if (!PL(item)) continue;
-                    /* IInventoryItemModel -> ItemDescription reference at +0x10 */
-                    uint64_t desc_ref = rr_u64(item + 0x10);
-                    uint64_t desc = PL(desc_ref) ? rr_u64(desc_ref + RR_OFF_REF_VALUE) : 0;
-                    if (!PL(desc)) continue;
-                    /* ItemDescription._basePrice (int) at +0x24 */
-                    int price = 0;
-                    if (rr_read(desc + 0x24, &price, sizeof(price)) && price > 0 && price < 10000000)
-                        total_val += price;
-                }
-            }
+        int inv_val = 0, veh_val = 0;
+        read_robber_inventory_cost(p, &inv_val, &veh_val);
+        if (veh_val <= 0 && c->inveh && c->vehicle_id >= 0 && g_world) {
+            veh_val = read_vehicle_trunk_cost(g_world, c->vehicle_id);
         }
-        /* Fallback: weapon item price */
-        if (total_val == 0 && PL(wm)) {
-            uint64_t eq2 = rr_u64(wm + RR_OFF_WEAPON_ITEM);
-            uint64_t ref2 = PL(eq2) ? rr_u64(eq2 + RR_OFF_WEAPON_ITEM) : 0;
-            uint64_t desc2 = PL(ref2) ? rr_u64(ref2 + RR_OFF_REF_VALUE) : 0;
-            if (PL(desc2)) {
-                int price = 0;
-                if (rr_read(desc2 + 0x24, &price, sizeof(price)) && price > 0 && price < 10000000)
-                    total_val += price;
-            }
-        }
-        c->inv_value = total_val;
+        c->inv_value = inv_val;
+        if (veh_val > 0) c->vehicle_value = veh_val;
     }
 }
 
@@ -1561,7 +1870,10 @@ static void cache_loot(int kind) {
     if (!PL(world) || rr_u64(world)!=g_k_world) return;
     LOOT_CACHE staged[RR_MAX_LOOT];
     int total=0;
-    uint64_t dict=rr_u64(world+(kind==1?0xA0:0xB0)), entries=0;
+    /* These collections moved in 26866884. The old 0xA0/0xB0 locations
+     * pointed at unrelated world dictionaries, so dropped/vehicle loot was
+     * silently rejected before it reached the menu's marker cache. */
+    uint64_t dict=rr_u64(world+(kind==1?RR_OFF_WEM_DROPPED_LOOT:RR_OFF_WEM_VEHICLE_LOOT)), entries=0;
     int used=0,n=0,stride=0;
     memset(st,0,sizeof st);
     if (!rr_ok() || (dict && (!PL(dict) || !rr_read(dict+U_DICT_COUNT,&used,4) || used<0 || used>4096))) return;
@@ -1611,6 +1923,7 @@ static void cache_loot(int kind) {
         l->id=key; l->kind=kind; l->rarity=rarity; l->pos=pos;
         l->obj=obj; l->pos_addr=pos_addr; l->flag_addr=flag_addr;
         l->desc=desc; l->loot=lootobj; l->inv=inventory;
+        l->value=read_item_value(inventory);
         ++total;
     }
     if (world!=g_world || rr_u64(world)!=g_k_world) return;
@@ -1771,6 +2084,7 @@ static void cache_vehicles(void) {
             VEH_CACHE* v = &g_vehicles_stage[count];
             memset(v, 0, sizeof(*v));
             v->obj = obj; v->klass = k; v->tr = tr; v->id = id; v->kind = kind;
+            v->vehicle_value = read_vehicle_trunk_cost(world, id);
             vehicle_owner_role(obj, kind, v->role, sizeof(v->role));
             int want_seats = br_get()->show_vehicle_markers && br_get()->show_vehicle_occupants;
             if (want_seats) {
@@ -2867,6 +3181,28 @@ static int read_camera(RR_CAMERA* cam) {
                     }
                 }
             }
+            if (ccfg->sky_color_on && PL(aim) && PL(g_battle) && rr_u64(g_battle+RR_OFF_BATTLE_WORLD)==g_world) {
+                uint64_t brain = rr_u64(aim+RR_OFF_AIM_BRAIN);
+                if (PL(brain) && class_named(rr_u64(brain),"CinemachineBrain")) {
+                    uint64_t cam_obj = rr_u64(brain + 0x50);
+                    if (PL(cam_obj)) {
+                        uint64_t native_cam = rr_u64(cam_obj + 0x10);
+                        if (PL(native_cam)) {
+                            float rgba[4] = {
+                                (float)ccfg->color[10].rgb[0] / 255.0f,
+                                (float)ccfg->color[10].rgb[1] / 255.0f,
+                                (float)ccfg->color[10].rgb[2] / 255.0f,
+                                1.0f
+                            };
+                            int clear_flags = 2; /* 2 = SolidColor in Unity CameraClearFlags */
+                            rr_write(native_cam + 0xF8, rgba, sizeof(rgba));
+                            rr_write(native_cam + 0x100, rgba, sizeof(rgba));
+                            rr_write(native_cam + 0x12C, &clear_flags, sizeof(clear_flags));
+                            rr_write(native_cam + 0x138, &clear_flags, sizeof(clear_flags));
+                        }
+                    }
+                }
+            }
             cam->valid = 1;
             cam->model_source = g_cam_obj;
             return 1;
@@ -3137,28 +3473,11 @@ static int snapshot_read(RR_PLAYER* out, int max, RR_CAMERA* cam) {
         p->id = snap[i].id;
         if (snap[i].cham_ready) p->cham_rig = snap[i].cham_native[0];
         p->health = -1;
-        if (cfg->show_health || cfg->show_health_bar) {
-            uint64_t data = rr_u64(snap[i].obj + RR_OFF_CHAR_DATA);
-            uint64_t private_data = PL(data) ? rr_u64(data + RR_OFF_DATA_PRIVATE) : 0;
-            if (PL(private_data)) {
-                uint64_t health = rr_u64(private_data + RR_OFF_PRIVATE_HEALTH); int32_t value = -1;
-                if (PL(health) && (rr_read(health + RR_OFF_PRIM_VALUE, &value, sizeof value) ||
-                                  rr_read(health + 0x10, &value, sizeof value)) &&
-                    value >= 0 && value <= 10000) p->health = value;
-            }
-            if (p->health < 0 && PL(data)) {
-                for (uint64_t off = 0x20; off <= 0x60; off += 8) {
-                    uint64_t cand = rr_u64(data + off);
-                    if (PL(cand)) {
-                        int32_t val = -1;
-                        if ((rr_read(cand + 0x18, &val, 4) || rr_read(cand + 0x10, &val, 4)) &&
-                            val > 0 && val <= 200) {
-                            p->health = val;
-                            break;
-                        }
-                    }
-                }
-            }
+        int live_hp = read_character_health(snap[i].obj);
+        if (live_hp >= 0) {
+            p->health = live_hp;
+            if (live_hp == 0) p->dead = 1;
+        } else {
             uint64_t isdead_obj = rr_u64(snap[i].obj + RR_OFF_CHAR_ISDEAD);
             if (PL(isdead_obj)) {
                 uint8_t d = 0;
@@ -3192,8 +3511,18 @@ static int snapshot_read(RR_PLAYER* out, int max, RR_CAMERA* cam) {
         snprintf(p->role, sizeof(p->role), "%s", snap[i].role);
         snprintf(p->weapon, sizeof(p->weapon), "%s", snap[i].weapon);
         snprintf(p->name, sizeof(p->name), "%s", snap[i].name);
-        p->inv_value     = snap[i].inv_value;
-        p->vehicle_value = snap[i].vehicle_value;
+        int live_inv = 0, live_veh = 0;
+        read_robber_inventory_cost(snap[i].obj, &live_inv, &live_veh);
+        /* The character cost model can expose a stale/shared vehicle field.
+         * When the player is inside a vehicle, the vehicle-trunk dictionary is
+         * the authoritative source for the vehicle value, so always prefer it
+         * over the character-side fallback. */
+        if (snap[i].inveh && snap[i].vehicle_id >= 0 && g_world) {
+            int trunk_veh = read_vehicle_trunk_cost(g_world, snap[i].vehicle_id);
+            if (trunk_veh > 0) live_veh = trunk_veh;
+        }
+        p->inv_value     = (live_inv > 0) ? live_inv : snap[i].inv_value;
+        p->vehicle_value = (live_veh > 0) ? live_veh : (snap[i].vehicle_value > 0 ? snap[i].vehicle_value : live_veh);
         p->pos.x = f[0]; p->pos.y = f[1]; p->pos.z = f[2];
         p->rot_yaw = f[4];
         p->head = p->pos;
@@ -3305,6 +3634,19 @@ static int snapshot_read(RR_PLAYER* out, int max, RR_CAMERA* cam) {
         if (cham_ok) memcpy(p->vehicle_pose, poses[i].matrix, sizeof(p->vehicle_pose));
         snprintf(p->name, sizeof(p->name), "%s", vehicle->name);
         snprintf(p->role, sizeof(p->role), "%s", vehicle->role);
+        p->vehicle_value = vehicle->vehicle_value;
+        /* A vehicle marker is not a character inventory.  Keep these fields
+         * independent so a vehicle value cannot leak into the inventory path. */
+        p->inv_value     = 0;
+        if (p->vehicle_value <= 0) {
+            for (int j = 0; j < RR_MAX_PLAYERS; ++j) {
+                if (snap[j].obj && (snap[j].vehicle_id == vehicle->id || snap[j].inveh) && snap[j].vehicle_value > 0) {
+                    p->vehicle_value = snap[j].vehicle_value;
+                    p->inv_value     = 0;
+                    break;
+                }
+            }
+        }
     }
 
     if (loot_world == g_world) for (int i = 0; i < nl && written < max; ++i) {
@@ -3316,6 +3658,7 @@ static int snapshot_read(RR_PLAYER* out, int max, RR_CAMERA* cam) {
         p->loot_rarity = loot->rarity;
         p->id = loot->id;
         p->pos = p->head = loot->pos;
+        p->inv_value = loot->value;
         snprintf(p->name, sizeof(p->name), "%s", loot->name);
     }
     /* Sample the camera after entity reads so turning the view does not wait
@@ -3437,18 +3780,7 @@ int game_w2s(const RR_CAMERA* cam, const RR_V3* world, int w, int h,
     float ndc_x = (cx / cz) / (tan_half * aspect);
     float ndc_y = (cy / cz) / tan_half;
 
-    const BR_Config* b = br_get();
-    float sfactor = (b->stretch_on && b->stretch_factor >= 100 && b->stretch_factor <= 200)
-                    ? ((float)b->stretch_factor / 100.0f) : 1.0f;
-
-    if (sx) {
-        float screen_x = (ndc_x * 0.5f + 0.5f) * (float)w;
-        if (sfactor != 1.0f) {
-            float mid_x = (float)w * 0.5f;
-            screen_x = mid_x + (screen_x - mid_x) * sfactor;
-        }
-        *sx = screen_x;
-    }
+    if (sx) *sx = (ndc_x * 0.5f + 0.5f) * (float)w;
     if (sy) *sy = (0.5f - ndc_y * 0.5f) * (float)h;
     return (ndc_x > -1.2f && ndc_x < 1.2f && ndc_y > -1.2f && ndc_y < 1.2f) ? 1 : 0;
 }
@@ -3475,9 +3807,6 @@ void game_w2s_many(const RR_CAMERA* cam, const RR_V3* world, int count, int w, i
     float t=tanf(cam->fov*3.14159265f/360.0f);
     if (!isfinite(t) || fabsf(t)<1e-6f) return;
     float px=(float)h*0.5f/t,py=px;
-    const BR_Config* bcfg = br_get();
-    float sfactor = (bcfg->stretch_on && bcfg->stretch_factor >= 100 && bcfg->stretch_factor <= 200)
-                    ? ((float)bcfg->stretch_factor / 100.0f) : 1.0f;
     float mid_w = (float)w * 0.5f;
 
     for (int i=0;i<count;++i) {
@@ -3486,9 +3815,7 @@ void game_w2s_many(const RR_CAMERA* cam, const RR_V3* world, int count, int w, i
         if (!isfinite(depth) || depth<=0.05f) continue;
         float x=(dx*rx+dy*ry+dz*rz)/depth, y=(dx*ux+dy*uy+dz*uz)/depth;
         if (isfinite(x) && isfinite(y)) {
-            float sx = mid_w + x * px;
-            if (sfactor != 1.0f) sx = mid_w + (sx - mid_w) * sfactor;
-            xy[2*i] = sx;
+            xy[2*i] = mid_w + x * px;
             xy[2*i+1] = h*0.5f - y*py;
         }
     }

@@ -12,13 +12,14 @@ extern "C" {
 #endif
 
 #define BR_MAGIC 0x57444D31u
-#define BR_VERSION 17u
+#define BR_VERSION 19u
 #define BR_COLOR_COUNT 15
 
 /* Shared schema for the WebView, defaults and on-disk settings.
  * Each entry is a field, default, minimum and maximum. */
 #define BR_SETTINGS(X) \
     X(enabled, 1, 0, 1) \
+    X(menu_key, 0x70, 1, 254) \
     X(stream_proof, 1, 0, 1) \
     X(show_box, 1, 0, 1) \
     X(show_skeleton, 1, 0, 1) \
@@ -47,6 +48,7 @@ extern "C" {
     X(aa_target_police, 0, 0, 1) \
     X(aa_bone, 0, 0, 9) \
     X(aa_los_on, 0, 0, 1) \
+    X(aa_ignore_knocked, 0, 0, 1) \
     X(aa_closest_first, 0, 0, 1) \
     X(show_loot, 0, 0, 1) \
     X(show_loot_nodes, 0, 0, 1) \
@@ -72,6 +74,7 @@ extern "C" {
     X(tb_bone, 2, 0, 9) \
     X(tb_px, 8, 1, 200) \
     X(tb_delay_ms, 0, 0, 500) \
+    X(tb_los_on, 0, 0, 1) \
     X(rc_on, 0, 0, 1) \
     X(rc_key, 0, 0, 254) \
     X(rc_strength, 75, 0, 100) \
@@ -84,12 +87,19 @@ extern "C" {
     X(custom_fov_val, 90, 60, 150) \
     X(show_vehicle_speed, 1, 0, 1) \
     X(speedometer_hud, 1, 0, 1) \
-    X(stretch_on, 0, 0, 1) \
-    X(stretch_factor, 133, 100, 200) \
+    X(speedometer_pos, 0, 0, 3) \
+    X(speedometer_x, 3, 0, 100) \
+    X(speedometer_y, 78, 0, 100) \
+    X(speedometer_scale, 100, 50, 150) \
+    X(sky_color_on, 0, 0, 1) \
+    X(sky_color_opacity, 60, 5, 100) \
     X(show_inv_value, 1, 0, 1) \
     X(inv_value_min, 0, 0, 1000000) \
+    X(show_vehicle_value, 1, 0, 1) \
     X(head_scale_x, 100, 50, 300) \
-    X(head_scale_y, 100, 50, 300)
+    X(head_scale_y, 100, 50, 300) \
+    X(stretch_on, 0, 0, 1) \
+    X(stretch_factor, 133, 100, 200)
 
 typedef struct BR_Config {
     unsigned int magic, version;
@@ -125,6 +135,7 @@ int br_start_menu(void);
 void br_stop_menu(void);
 void br_set_menu_visible(int visible);
 void br_request_toggle(void);
+void br_play_intro(void);
 
 #ifdef __cplusplus
 }

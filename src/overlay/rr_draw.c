@@ -423,6 +423,77 @@ static void draw_loot(const RR_PLAYER* p, const RR_CAMERA* cam, int vw, int vh) 
     };
     float x, y;
     if (!game_w2s(cam, &p->pos, vw, vh, &x, &y)) return;
+
+    /* ---- is_loot kind table:
+     * 1 = loose item,  2 = loot node,  3 = container (kasa/çekmece),
+     * 4 = door,        5 = dropped loot (ölü düşen),  6 = vehicle loot (araç)
+     * ---- */
+
+    if (p->is_loot == 3) {
+        /* Container: kasa, çekmece, dolap — turuncu dikdörtgen işareti */
+        const char* cname = p->name[0] ? p->name : "Konteyner";
+        char clabel[RR_NAME_MAX + 32];
+        snprintf(clabel, sizeof(clabel), "\360\237\223\246 %s (%.0f m)", cname, p->dist);
+        RGBA col = RRGB(255, 165, 50);
+        /* Küçük kare işaret */
+        gpu_pen(col, 1.5f);
+        r_line(x - 5.0f, y - 4.0f, x + 5.0f, y - 4.0f);
+        r_line(x + 5.0f, y - 4.0f, x + 5.0f, y + 4.0f);
+        r_line(x + 5.0f, y + 4.0f, x - 5.0f, y + 4.0f);
+        r_line(x - 5.0f, y + 4.0f, x - 5.0f, y - 4.0f);
+        gpu_font(11.0f);
+        r_text(x, y + 8.0f, clabel, col, RT_CENTER | RT_OUTLINE);
+        return;
+    }
+    if (p->is_loot == 4) {
+        /* Kapı */
+        const char* dname = p->name[0] ? p->name : "Kap\304\261";
+        char dlabel[RR_NAME_MAX + 32];
+        snprintf(dlabel, sizeof(dlabel), "[D] %s (%.0f m)", dname, p->dist);
+        RGBA col = RRGB(200, 200, 200);
+        r_fill_ellipse(x, y, 3.0f, 3.0f, col);
+        gpu_font(10.0f);
+        r_text(x, y + 7.0f, dlabel, col, RT_CENTER | RT_OUTLINE);
+        return;
+    }
+    if (p->is_loot == 5) {
+        /* Düşürülen loot (ölü düşen) — yeşil yıldız işareti */
+        const char* dname = p->name[0] ? p->name : "D\303\274\305\237en Loot";
+        int rarity = p->loot_rarity >= 1 && p->loot_rarity <= 6 ? p->loot_rarity : 0;
+        char dlabel[RR_NAME_MAX + 48];
+        snprintf(dlabel, sizeof(dlabel), "\342\230\205 %s%s%s (%.0f m)",
+                 dname, rarity ? " / " : "", rarity_names[rarity], p->dist);
+        RGBA col = rarity_colors[rarity];
+        if (!rarity) col = RRGB(111, 232, 145);
+        /* Üçgen işareti (dropped) */
+        gpu_pen(col, 1.5f);
+        r_line(x, y - 6.0f, x + 5.5f, y + 4.0f);
+        r_line(x + 5.5f, y + 4.0f, x - 5.5f, y + 4.0f);
+        r_line(x - 5.5f, y + 4.0f, x, y - 6.0f);
+        gpu_font(11.0f);
+        r_text(x, y + 8.0f, dlabel, col, RT_CENTER | RT_OUTLINE);
+        return;
+    }
+    if (p->is_loot == 6) {
+        /* Araç loot — mavi elmas işareti */
+        const char* vname = p->name[0] ? p->name : "Ara\303\247 Lootu";
+        int rarity = p->loot_rarity >= 1 && p->loot_rarity <= 6 ? p->loot_rarity : 0;
+        char vlabel[RR_NAME_MAX + 48];
+        snprintf(vlabel, sizeof(vlabel), "\342\227\206 %s%s%s (%.0f m)",
+                 vname, rarity ? " / " : "", rarity_names[rarity], p->dist);
+        RGBA col = rarity_colors[rarity];
+        if (!rarity) col = RRGB(105, 178, 255);
+        gpu_pen(col, 1.5f);
+        r_line(x, y - 6.0f, x + 5.0f, y);
+        r_line(x + 5.0f, y, x, y + 6.0f);
+        r_line(x, y + 6.0f, x - 5.0f, y);
+        r_line(x - 5.0f, y, x, y - 6.0f);
+        gpu_font(11.0f);
+        r_text(x, y + 8.0f, vlabel, col, RT_CENTER | RT_OUTLINE);
+        return;
+    }
+
+    /* is_loot == 1 (loose) or 2 (node) */
     int rarity = p->loot_rarity >= 1 && p->loot_rarity <= 6 ? p->loot_rarity : 0;
     const char* name = p->name[0] ? p->name : "Ganimet";
     const char* prefix = p->is_loot == 2 ? "Ganimet noktas\304\261: " : "";
@@ -436,6 +507,55 @@ static void draw_loot(const RR_PLAYER* p, const RR_CAMERA* cam, int vw, int vh) 
     r_text(x, y + 6.0f, label, color, RT_CENTER | RT_OUTLINE);
 }
 
+static void draw_sky(const RR_CAMERA* cam, int vw, int vh, const BR_Config* b) {
+    if (!b->sky_color_on || !cam || !cam->valid || vw <= 0 || vh <= 0) return;
+
+    unsigned char r = b->color[10].rgb[0];
+    unsigned char g = b->color[10].rgb[1];
+    unsigned char bl = b->color[10].rgb[2];
+
+    int opacity = b->sky_color_opacity;
+    if (opacity < 5) opacity = 5;
+    if (opacity > 100) opacity = 100;
+    unsigned char a = (unsigned char)((opacity * 255) / 100);
+
+    /* Horizon calculation:
+     * In Rob Run coordinate system, cam->fwd.y represents vertical look direction (-1 straight down, +1 straight up).
+     * Vertical field of view is cam->fov in degrees.
+     */
+    float pitch_sin = cam->fwd.y;
+    if (pitch_sin > 0.999f) pitch_sin = 0.999f;
+    if (pitch_sin < -0.999f) pitch_sin = -0.999f;
+    float pitch = asinf(pitch_sin);
+
+    float fov_deg = (cam->fov >= 10.0f && cam->fov <= 170.0f) ? cam->fov : 60.0f;
+    float half_fov_rad = fov_deg * (3.14159265f / 360.0f);
+    float tan_fov = tanf(half_fov_rad);
+    if (tan_fov < 0.05f) tan_fov = 0.05f;
+
+    /* Project horizon: when looking level (pitch=0), horizon is at vh * 0.5f.
+     * When looking up (pitch > 0), horizon drops down (y increases).
+     * When looking down (pitch < 0), horizon rises up (y decreases).
+     */
+    float horizon_y = (float)vh * 0.5f * (1.0f + tanf(pitch) / tan_fov);
+
+    /* Sky occupies screen above the horizon line (from y=0 to y=horizon_y). */
+    if (horizon_y > 0.0f) {
+        float sky_h = horizon_y > (float)vh ? (float)vh : horizon_y;
+        r_fill(0.0f, 0.0f, (float)vw, sky_h, RARGB(a, r, g, bl));
+
+        /* Soft atmospheric transition band around horizon */
+        if (horizon_y < (float)vh) {
+            float band_h = 24.0f;
+            if (sky_h + band_h > (float)vh) band_h = (float)vh - sky_h;
+            if (band_h > 0.0f) {
+                unsigned char band_a = (unsigned char)(a / 2);
+                r_fill(0.0f, sky_h, (float)vw, band_h, RARGB(band_a, r, g, bl));
+            }
+        }
+    }
+}
+
 void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh) {
     BR_Config* b = br_get();
     if (!b->enabled) return;
@@ -445,6 +565,10 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
     float line_w = (float)(b->line_w < 1 ? 1 : (b->line_w > 4 ? 4 : b->line_w));
     if (vw < 16 || vh < 16) return;
     if (n>RR_MAX_PLAYERS) n=RR_MAX_PLAYERS;
+
+    if (b->sky_color_on && cam && cam->valid) {
+        draw_sky(cam, vw, vh, b);
+    }
 
     if (n > 0) rr_speed_update(arr, n);
 
@@ -516,6 +640,21 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
                     RGBA color = RRGB(255, 214, 110);
                     r_fill_ellipse(x, y, 4.0f, 4.0f, color);
                     gpu_font(12.0f); r_text(x, y + 6.0f, label, color, RT_CENTER | RT_OUTLINE);
+
+                    /* Vehicle trunk/loot value label - kutunun hemen altında */
+                    if (b->show_vehicle_value && p->vehicle_value > 0) {
+                        char vbuf[48];
+                        int vval = p->vehicle_value;
+                        if (vval >= 1000000)
+                            snprintf(vbuf, sizeof(vbuf), "Bagaj: $%.2fM", (float)vval / 1000000.0f);
+                        else if (vval >= 1000)
+                            snprintf(vbuf, sizeof(vbuf), "Bagaj: $%d.%03d", vval / 1000, vval % 1000);
+                        else
+                            snprintf(vbuf, sizeof(vbuf), "Bagaj: $%d", vval);
+                        RGBA vcol = RARGB(230, 255, 215, 60); /* gold */
+                        gpu_font(10.0f);
+                        r_text(x, y + 20.0f, vbuf, vcol, RT_CENTER | RT_OUTLINE);
+                    }
                 }
             }
             continue;
@@ -547,11 +686,11 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
         float bh = fabsf(fy - hy);
         if (bh < 4.0f) bh = 4.0f;
         if (p->inveh && bh > 420.0f) bh = 420.0f;
-        float stretch = (b->stretch_on && b->stretch_factor >= 100 && b->stretch_factor <= 200)
-                        ? ((float)b->stretch_factor / 100.0f) : 1.0f;
-        float bw = (bh * (p->inveh ? 1.30f : 0.52f) + fabsf(hx - fx)) * stretch;
+        float bw = (bh * (p->inveh ? 1.30f : 0.52f) + fabsf(hx - fx));
         float bx = (fx + hx) * 0.5f - bw * 0.5f;
         float by = fminf(hy, fy);
+        float marker_cx = (fx + hx) * 0.5f;
+        bx = marker_cx - bw * 0.5f;
         if (bx < -200 || bx > vw + 200 || by < -200 || by > vh + 200) continue;
 
         RGBA col = player_color(p);
@@ -568,16 +707,16 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
         if (b->show_head) {
             /* Clamp the head-dot radius so nearby players do not produce oversized
              * markers. head_scale_x/y allow independent horizontal/vertical scaling
-             * (100 = 1×, 200 = 2×). stretch_on also expands the horizontal radius.
+             * (100 = 1×, 200 = 2×).
              */
-            float r = (bw / stretch) * 0.11f;
+            float r = bw * 0.11f;
             if (r < 2.0f) r = 2.0f;
             if (r > 9.0f) r = 9.0f;
             float hsx = (b->head_scale_x >= 50 && b->head_scale_x <= 300)
                         ? ((float)b->head_scale_x / 100.0f) : 1.0f;
             float hsy = (b->head_scale_y >= 50 && b->head_scale_y <= 300)
                         ? ((float)b->head_scale_y / 100.0f) : 1.0f;
-            float rx = r * stretch * hsx;
+            float rx = r * hsx;
             float ry = r * hsy;
             r_fill_ellipse(hx, hy, rx, ry, col);
         }
@@ -642,7 +781,7 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
         }
         if (p->hidden_in_object) {
             gpu_font(12.0f);
-            r_text(fx, by - 49.0f, p->hidden_in_object == 2 ? "SAKLANIYOR OLAB\304\260L\304\260R" : "SAKLANIYOR", col, RT_CENTER | RT_OUTLINE);
+            r_text(fx, by - (p->inveh ? 66.0f : 49.0f), p->hidden_in_object == 2 ? "SAKLANIYOR OLAB\304\260L\304\260R" : "SAKLANIYOR", col, RT_CENTER | RT_OUTLINE);
         }
         if (p->inveh) {
             char vbuf[64];
@@ -663,7 +802,7 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
             fmt_num(buf, sizeof(buf), (unsigned)(p->dist + 0.5f), " m");
             gpu_font(11.0f);
             r_text(fx, label_y, buf, slot_color(8), RT_CENTER | RT_OUTLINE);
-            label_y += 12.0f;
+            label_y += 14.0f;
         }
         if (b->show_weapon && p->weapon[0]) {
             /* "dp9_m1" -> "DP9": the replicated id carries a variant suffix */
@@ -676,7 +815,7 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
             wbuf[k] = 0;
             gpu_font(10.0f);
             r_text(fx, label_y, wbuf, slot_color(7), RT_CENTER | RT_OUTLINE);
-            label_y += 11.0f;
+            label_y += 14.0f;
         }
         if ((b->show_health || b->show_health_bar) && p->health >= 0) {
             /* ---- Grafik health bar (kutu sol kenarına yaslanır) ---- */
@@ -756,31 +895,34 @@ void draw_esp(const RR_PLAYER* arr, int n, const RR_CAMERA* cam, int vw, int vh)
         /* ---- Inventory value label ---- */
         if (b->show_inv_value && p->inv_value > 0 && p->inv_value >= b->inv_value_min) {
             char valbuf[32];
-            /* Format: "$1,234" */
             int v = p->inv_value;
             if (v >= 1000000)
-                snprintf(valbuf, sizeof(valbuf), "$%.1fM", (float)v / 1000000.0f);
+                snprintf(valbuf, sizeof(valbuf), "$%.2fM", (float)v / 1000000.0f);
             else if (v >= 1000)
-                snprintf(valbuf, sizeof(valbuf), "$%.1fK", (float)v / 1000.0f);
+                snprintf(valbuf, sizeof(valbuf), "$%d.%03d", v / 1000, v % 1000);
             else
                 snprintf(valbuf, sizeof(valbuf), "$%d", v);
-            RGBA val_col = RARGB(220, 255, 215, 60);  /* gold */
-            gpu_font(10.0f);
-            r_text(bx + bw + 3.0f, by + bh * 0.3f, valbuf, val_col, RT_LEFT | RT_OUTLINE);
+            RGBA val_col = RARGB(255, 255, 215, 60); /* gold */
+            char stackbuf[40];
+            snprintf(stackbuf, sizeof(stackbuf), "\303\207anta: %s", valbuf);
+            gpu_font(11.0f);
+            r_text(fx, label_y, stackbuf, val_col, RT_CENTER | RT_OUTLINE);
+            label_y += 14.0f;
         }
-        /* ---- Vehicle item value label ---- */
-        if (b->show_inv_value && p->vehicle_value > 0) {
-            char vehvalbuf[32];
+        /* ---- Vehicle item value label (player in vehicle) ---- */
+        if (b->show_vehicle_value && p->vehicle_value > 0) {
+            char vehvalbuf[40];
             int vv = p->vehicle_value;
             if (vv >= 1000000)
-                snprintf(vehvalbuf, sizeof(vehvalbuf), "Ara\303\247:$%.1fM", (float)vv / 1000000.0f);
+                snprintf(vehvalbuf, sizeof(vehvalbuf), "Ara\303\247: $%.2fM", (float)vv / 1000000.0f);
             else if (vv >= 1000)
-                snprintf(vehvalbuf, sizeof(vehvalbuf), "Ara\303\247:$%.1fK", (float)vv / 1000.0f);
+                snprintf(vehvalbuf, sizeof(vehvalbuf), "Ara\303\247: $%d.%03d", vv / 1000, vv % 1000);
             else
-                snprintf(vehvalbuf, sizeof(vehvalbuf), "Ara\303\247:$%d", vv);
-            RGBA vehval_col = RARGB(200, 255, 170, 50);
-            gpu_font(9.0f);
-            r_text(bx + bw + 3.0f, by + bh * 0.55f, vehvalbuf, vehval_col, RT_LEFT | RT_OUTLINE);
+                snprintf(vehvalbuf, sizeof(vehvalbuf), "Ara\303\247: $%d", vv);
+            RGBA vehval_col = RARGB(220, 255, 170, 50); /* amber */
+            gpu_font(11.0f);
+            r_text(fx, label_y, vehvalbuf, vehval_col, RT_CENTER | RT_OUTLINE);
+            label_y += 14.0f;
         }
         if (p->dead) {
             gpu_font(10.0f);
